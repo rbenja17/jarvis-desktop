@@ -1,0 +1,19 @@
+# Secretos y configuracion personal (nunca se suben a git)
+.env
+.env.local
+config.toml
+
+# Entorno Python y caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Datos locales de JARVIS (perfil, instrucciones, logs, memoria, recordatorios, tokens, voz)
+data/
+
+# Artefactos de empaquetado / build
+build/
+dist/
+*.spec.bak

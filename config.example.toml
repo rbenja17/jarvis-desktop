@@ -1,0 +1,103 @@
+[usuario]
+nombre = ""
+tratamiento = "señor"
+ciudad = ""
+
+[gemini]
+modelo_voz = "gemini-3.8-live"
+modelos_texto = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+voz = "Charon"
+busqueda_google = false
+modo_voz = "live"
+
+[activacion]
+wake_word = true
+modelo_wake_word = "hey_jarvis"
+umbral = 0.38
+umbral_con_su_voz = 0.60
+bloques_consecutivos = 2
+filtro_voz = 0.5
+atajo = "ctrl+alt+j"
+pausa_para_responder_ms = 1800
+segundos_inactividad = 22
+
+[audio]
+interrumpir = "auto"
+voz_respaldo = "es-MX-JorgeNeural"
+volumen_sonidos = 0.35
+
+[dictado]
+automatico = true
+
+[pantalla]
+permitir = true
+
+[interfaz]
+mostrar_orbe = true
+tamano_orbe = 150
+
+[canales]
+telegram = true
+http = true
+http_host = "0.0.0.0"
+http_puerto = 8765
+
+[archivos]
+carpetas_extra = []
+
+[apps.alias]
+"navegador" = "Google Chrome"
+"chrome" = "Google Chrome"
+"musica" = "Spotify"
+"codigo" = "Visual Studio Code"
+"vscode" = "Visual Studio Code"
+"terminal" = "Terminal"
+"calculadora" = "Calculadora"
+"explorador" = "Explorador de archivos"
+"archivos" = "Explorador de archivos"
+"administrador de tareas" = "Administrador de tareas"
+"reloj" = "Reloj"
+"to do" = "Microsoft To Do"
+"todo" = "Microsoft To Do"
+"tareas" = "Microsoft To Do"
+"notas" = "Bloc de notas"
+
+[resumen]
+al_iniciar = true
+desde_hora = 5
+hasta_hora = 12
+hora = "08:00"
+esperar_presencia = true
+voz = true
+telegram = true
+noticias = true
+noticias_pais = "AR"
+
+[monitores]
+bateria_baja = 20
+avisar_al_celular = false
+disco_minimo_gb = 10
+
+[avisos]
+silencio_desde = "23:30"
+silencio_hasta = "07:30"
+
+[[rutinas.modo_trabajo]]
+herramienta = "abrir_app"
+args = { nombre = "Visual Studio Code" }
+
+[[rutinas.modo_trabajo]]
+herramienta = "fijar_volumen"
+args = { nivel = 30 }
+
+[[rutinas.modo_pelicula]]
+herramienta = "fijar_brillo"
+args = { nivel = 90 }
+
+[[rutinas.modo_pelicula]]
+herramienta = "fijar_volumen"
+args = { nivel = 60 }
+
+[[rutinas.modo_pelicula]]
+herramienta = "abrir_web"
+args = { sitio = "netflix" }
