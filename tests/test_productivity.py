@@ -341,3 +341,58 @@ def test_calendar_delete_disambiguates_duplicates_and_deletes_exact_date(monkeyp
     assert removed["fecha"] == d2
     assert fake.deleted == [("primary", "g2")]
     assert "g1" in fake.items and "g2" not in fake.items
+
+
+def test_calendar_bulk_delete_and_color_edit_in_range(monkeypatch):
+    from jarvis.tools import google_ws
+
+    fake = _FakeCalendarService(
+        [
+            {
+                "id": "fac1",
+                "summary": "FACULTAD",
+                "start": {"dateTime": dt.datetime.fromisoformat("2026-11-26T14:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat("2026-11-26T18:00").astimezone().isoformat()},
+            },
+            {
+                "id": "fac2",
+                "summary": "FACULTAD",
+                "start": {"dateTime": dt.datetime.fromisoformat("2026-12-03T14:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat("2026-12-03T18:00").astimezone().isoformat()},
+            },
+            {
+                "id": "fac3",
+                "summary": "FACULTAD",
+                "start": {"dateTime": dt.datetime.fromisoformat("2027-01-15T14:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat("2027-01-15T18:00").astimezone().isoformat()},
+            },
+            {
+                "id": "fin1",
+                "summary": "Final de Software",
+                "start": {"dateTime": dt.datetime.fromisoformat("2026-11-29T09:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat("2026-11-29T11:00").astimezone().isoformat()},
+            },
+            {
+                "id": "fin2",
+                "summary": "Final de Álgebra",
+                "start": {"dateTime": dt.datetime.fromisoformat("2026-12-12T09:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat("2026-12-12T11:00").astimezone().isoformat()},
+            },
+        ]
+    )
+    monkeypatch.setattr(google_ws, "_service", lambda name, version: fake)
+
+    bulk_del = google_ws.eliminar_evento(titulo="facultad", desde="2026-12-01", hasta="2027-02-28")
+    assert bulk_del["eliminados"] == 2
+    assert "fac1" in fake.items
+    assert "fac2" not in fake.items and "fac3" not in fake.items
+
+    bulk_col = google_ws.editar_evento(titulo="final", desde="2026-11-01", hasta="2026-12-31", color="rojo")
+    assert bulk_col["actualizados"] == 2
+    assert bulk_col["color"] == "rojo"
+    assert fake.items["fin1"]["colorId"] == "11"
+    assert fake.items["fin2"]["colorId"] == "11"
+
+    found = google_ws.agenda(desde="2026-11-01", hasta="2026-12-31", buscar="final")["eventos"]
+    assert len(found) == 2
+    assert all(e["color"] == "rojo" for e in found)
