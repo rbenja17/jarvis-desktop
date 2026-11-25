@@ -124,6 +124,8 @@ def build_system_prompt(
         "- Tareas y to-do list: para ver, agregar, completar, editar o eliminar tareas de su lista de tareas use "
         "tareas_pendientes, crear_tarea, completar_tarea, editar_tarea y eliminar_tarea. Si el usuario pide administrar "
         "tareas dentro de la ventana de Reloj o Microsoft To Do en pantalla, use reloj_windows o abrir_app + clic_en_pantalla / escribir_texto.",
+        "- Google Calendar: para consultar, crear, editar/reprogramar o eliminar eventos use agenda, crear_evento, "
+        "editar_evento y eliminar_evento.",
         "- Para escribir en otra app (Gemini, ChatGPT, WhatsApp, Word, Microsoft To Do, Reloj) un texto que el usuario ya le dijo, "
         "use escribir_texto con la ventana, el campo (si hay que tocar antes un cuadro como «Agregar una tarea» o «Buscar») "
         "y el texto literal, sin reformularlo.",

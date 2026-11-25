@@ -9,7 +9,7 @@ from email.utils import parseaddr
 from typing import Annotated, Literal
 
 from jarvis.config import data_path
-from jarvis.textutil import best_match
+from jarvis.textutil import best_match, normalize
 from jarvis.tools.registry import ToolError, tool
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,123 @@ def _event_time(value: dict) -> tuple[dt.datetime, bool]:
     return dt.datetime.fromisoformat(value["date"]).astimezone(), True
 
 
+def _parse_event_bounds(inicio: str, duracion_minutos: int = 60) -> tuple[dict, dict]:
+    text = inicio.strip()
+    if len(text) == 10:
+        day = dt.date.fromisoformat(text)
+        return {"date": day.isoformat()}, {"date": (day + dt.timedelta(days=1)).isoformat()}
+    begin = dt.datetime.fromisoformat(text)
+    begin = begin.astimezone() if begin.tzinfo is None else begin
+    end = begin + dt.timedelta(minutes=max(5, int(duracion_minutos)))
+    return {"dateTime": begin.isoformat()}, {"dateTime": end.isoformat()}
+
+
+def _event_duration_minutes(ev: dict) -> int:
+    start_val = ev.get("start") or {}
+    end_val = ev.get("end") or {}
+    if "dateTime" in start_val and "dateTime" in end_val:
+        try:
+            begin = dt.datetime.fromisoformat(start_val["dateTime"])
+            end = dt.datetime.fromisoformat(end_val["dateTime"])
+            mins = round((end - begin).total_seconds() / 60)
+            if mins >= 5:
+                return mins
+        except ValueError:
+            pass
+    return 60
+
+
+def _format_event_summary(ev: dict) -> str:
+    begin, all_day = _event_time(ev["start"])
+    when = f"{begin:%Y-%m-%d} (todo el dia)" if all_day else f"{begin:%Y-%m-%d %H:%M}"
+    return f"'{ev.get('summary', '(sin titulo)')}' ({when}, id={ev.get('id', '')})"
+
+
+def _writable_calendars(service) -> list[dict]:
+    calendars = service.calendarList().list(minAccessRole="writer").execute().get("items", [])
+    selected = [c for c in calendars if c.get("selected") or c.get("primary")]
+    return selected or [{"id": "primary", "primary": True, "summary": ""}]
+
+
+def _find_event(
+    service,
+    titulo: str = "",
+    fecha: str = "",
+    evento_id: str = "",
+    dias: int = 60,
+) -> tuple[str, dict]:
+    calendars = _writable_calendars(service)
+    clean_id = evento_id.strip()
+    if clean_id:
+        ordered = sorted(calendars, key=lambda c: not c.get("primary"))
+        for cal in ordered:
+            try:
+                ev = service.events().get(calendarId=cal["id"], eventId=clean_id).execute()
+                if ev and ev.get("status") != "cancelled":
+                    return cal["id"], ev
+            except Exception:
+                continue
+        raise ToolError(f"No encontre ningun evento editable con id '{clean_id}'.")
+
+    clean_title = titulo.strip()
+    clean_date = fecha.strip()[:10]
+    if not clean_title and not clean_date:
+        raise ToolError("Indique el titulo, la fecha o el evento_id del evento.")
+
+    now = dt.datetime.now().astimezone()
+    if clean_date:
+        day = dt.date.fromisoformat(clean_date)
+        start = dt.datetime(day.year, day.month, day.day).astimezone()
+        end = start + dt.timedelta(days=1)
+    else:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + dt.timedelta(days=max(1, dias))
+
+    candidates: list[tuple[str, dict]] = []
+    for cal in calendars:
+        items = (
+            service.events()
+            .list(
+                calendarId=cal["id"],
+                timeMin=start.isoformat(),
+                timeMax=end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=50,
+            )
+            .execute()
+            .get("items", [])
+        )
+        for ev in items:
+            if ev.get("status") != "cancelled" and "start" in ev:
+                candidates.append((cal["id"], ev))
+
+    if not candidates:
+        suffix = f" el {clean_date}" if clean_date else f" en los proximos {dias} dias"
+        raise ToolError(f"No encontre eventos editables{suffix}.")
+
+    if not clean_title:
+        if len(candidates) == 1:
+            return candidates[0]
+        listing = "; ".join(_format_event_summary(ev) for _, ev in candidates[:5])
+        raise ToolError(f"Hay varios eventos el {clean_date}. Indique cual: {listing}.")
+
+    match, _ = best_match(clean_title, candidates, key=lambda pair: pair[1].get("summary", ""), threshold=55)
+    if match is None:
+        suffix = f" el {clean_date}" if clean_date else ""
+        raise ToolError(f"No encontre ningun evento parecido a '{clean_title}'{suffix}.")
+
+    if not clean_date:
+        norm_target = normalize(match[1].get("summary", ""))
+        same = [pair for pair in candidates if normalize(pair[1].get("summary", "")) == norm_target]
+        if len(same) > 1:
+            listing = "; ".join(_format_event_summary(ev) for _, ev in same[:5])
+            raise ToolError(
+                f"Hay {len(same)} eventos con ese titulo. Indique la fecha (AAAA-MM-DD) o el evento_id: {listing}."
+            )
+    return match
+
+
 def events(days: int = 1, from_now: bool = False) -> list[dict]:
     service = _service("calendar", "v3")
     now = dt.datetime.now().astimezone()
@@ -127,7 +244,9 @@ def events(days: int = 1, from_now: bool = False) -> list[dict]:
             begin, all_day = _event_time(ev["start"])
             out.append(
                 {
+                    "id": ev.get("id", ""),
                     "titulo": ev.get("summary", "(sin titulo)"),
+                    "fecha": begin.strftime("%Y-%m-%d"),
                     "dia": begin.strftime("%d/%m"),
                     "hora": "todo el dia" if all_day else begin.strftime("%H:%M"),
                     "lugar": ev.get("location", ""),
@@ -159,19 +278,88 @@ def crear_evento(
     lugar: Annotated[str, "Lugar opcional"] = "",
 ) -> dict:
     service = _service("calendar", "v3")
-    body: dict = {"summary": titulo, "description": descripcion, "location": lugar}
-    text = inicio.strip()
-    if len(text) == 10:
-        day = dt.date.fromisoformat(text)
-        body["start"] = {"date": day.isoformat()}
-        body["end"] = {"date": (day + dt.timedelta(days=1)).isoformat()}
-    else:
-        begin = dt.datetime.fromisoformat(text)
-        begin = begin.astimezone() if begin.tzinfo is None else begin
-        body["start"] = {"dateTime": begin.isoformat()}
-        body["end"] = {"dateTime": (begin + dt.timedelta(minutes=max(5, duracion_minutos))).isoformat()}
+    start_body, end_body = _parse_event_bounds(inicio, duracion_minutos)
+    body: dict = {
+        "summary": titulo,
+        "description": descripcion,
+        "location": lugar,
+        "start": start_body,
+        "end": end_body,
+    }
     created = service.events().insert(calendarId="primary", body=body).execute()
-    return {"creado": created.get("summary"), "inicio": text}
+    return {"creado": created.get("summary"), "inicio": inicio.strip(), "id": created.get("id", "")}
+
+
+@tool(
+    "Edita o reprograma un evento existente en Google Calendar (titulo, fecha/hora, duracion, "
+    "descripcion o lugar). Busca por evento_id o por titulo aproximado y fecha opcional."
+)
+def editar_evento(
+    titulo: Annotated[str, "Titulo actual aproximado del evento (opcional si pasa evento_id)"] = "",
+    fecha: Annotated[str, "Fecha actual del evento AAAA-MM-DD para desambiguar (opcional)"] = "",
+    evento_id: Annotated[str, "ID exacto del evento obtenido de agenda (opcional)"] = "",
+    nuevo_titulo: Annotated[str, "Nuevo titulo para el evento (opcional)"] = "",
+    nuevo_inicio: Annotated[str, "Nueva fecha/hora AAAA-MM-DDTHH:MM o AAAA-MM-DD si es dia completo (opcional)"] = "",
+    duracion_minutos: Annotated[int, "Nueva duracion en minutos; 0 mantiene la duracion actual"] = 0,
+    descripcion: Annotated[str, "Nueva descripcion (opcional)"] = "",
+    lugar: Annotated[str, "Nuevo lugar (opcional)"] = "",
+) -> dict:
+    if not any([nuevo_titulo.strip(), nuevo_inicio.strip(), duracion_minutos > 0, descripcion.strip(), lugar.strip()]):
+        raise ToolError("No se indico ningun cambio para el evento.")
+    service = _service("calendar", "v3")
+    cal_id, ev = _find_event(service, titulo=titulo, fecha=fecha, evento_id=evento_id)
+    old_summary = ev.get("summary", "(sin titulo)")
+    updated_body = dict(ev)
+
+    if nuevo_titulo.strip():
+        updated_body["summary"] = nuevo_titulo.strip()
+    if descripcion.strip():
+        updated_body["description"] = descripcion.strip()
+    if lugar.strip():
+        updated_body["location"] = lugar.strip()
+
+    if nuevo_inicio.strip():
+        mins = duracion_minutos if duracion_minutos > 0 else _event_duration_minutes(ev)
+        updated_body["start"], updated_body["end"] = _parse_event_bounds(nuevo_inicio, mins)
+    elif duracion_minutos > 0:
+        start_val = ev.get("start") or {}
+        if "dateTime" not in start_val:
+            raise ToolError(
+                "Para cambiar la duracion de un evento de dia completo, indique tambien nuevo_inicio con hora (AAAA-MM-DDTHH:MM)."
+            )
+        begin = dt.datetime.fromisoformat(start_val["dateTime"])
+        updated_body["end"] = {"dateTime": (begin + dt.timedelta(minutes=max(5, int(duracion_minutos)))).isoformat()}
+
+    updated = service.events().update(calendarId=cal_id, eventId=ev["id"], body=updated_body).execute()
+    begin, all_day = _event_time(updated["start"])
+    return {
+        "antes": old_summary,
+        "titulo": updated.get("summary", old_summary),
+        "fecha": begin.strftime("%Y-%m-%d"),
+        "hora": "todo el dia" if all_day else begin.strftime("%H:%M"),
+        "lugar": updated.get("location", ""),
+        "id": updated.get("id", ev["id"]),
+    }
+
+
+@tool(
+    "Elimina o cancela un evento existente en Google Calendar. Busca por evento_id o por titulo "
+    "aproximado y fecha opcional AAAA-MM-DD si hay varios eventos con ese nombre."
+)
+def eliminar_evento(
+    titulo: Annotated[str, "Titulo aproximado del evento a borrar (opcional si pasa evento_id)"] = "",
+    fecha: Annotated[str, "Fecha del evento AAAA-MM-DD para desambiguar (opcional)"] = "",
+    evento_id: Annotated[str, "ID exacto del evento obtenido de agenda (opcional)"] = "",
+) -> dict:
+    service = _service("calendar", "v3")
+    cal_id, ev = _find_event(service, titulo=titulo, fecha=fecha, evento_id=evento_id)
+    begin, all_day = _event_time(ev["start"])
+    service.events().delete(calendarId=cal_id, eventId=ev["id"]).execute()
+    return {
+        "eliminado": ev.get("summary", "(sin titulo)"),
+        "fecha": begin.strftime("%Y-%m-%d"),
+        "hora": "todo el dia" if all_day else begin.strftime("%H:%M"),
+    }
 
 
 QUERIES = {

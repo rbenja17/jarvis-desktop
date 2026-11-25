@@ -189,3 +189,155 @@ def test_uia_locate_matches_clock_and_todo_controls(monkeypatch):
 
     todo_hit = screen.uia_locate(123, "Agregar una tarea")
     assert todo_hit is not None and todo_hit["x"] == 700
+
+
+class _FakeReq:
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self):
+        return self._result
+
+
+class _FakeCalendarService:
+    def __init__(self, items: list[dict]):
+        self.items = {ev["id"]: dict(ev) for ev in items}
+        self.deleted: list[tuple[str, str]] = []
+        self.updated: list[tuple[str, str, dict]] = []
+
+    def calendarList(self):
+        return self
+
+    def events(self):
+        return self
+
+    def list(self, **kwargs):
+        if "minAccessRole" in kwargs:
+            return _FakeReq({"items": [{"id": "primary", "primary": True, "selected": True, "summary": "Principal"}]})
+        tmin = dt.datetime.fromisoformat(kwargs["timeMin"]) if "timeMin" in kwargs else None
+        tmax = dt.datetime.fromisoformat(kwargs["timeMax"]) if "timeMax" in kwargs else None
+        out = []
+        for ev in self.items.values():
+            raw = ev["start"].get("dateTime") or ev["start"].get("date")
+            ev_dt = dt.datetime.fromisoformat(raw)
+            ev_dt = ev_dt.astimezone() if ev_dt.tzinfo is None else ev_dt
+            if tmin and ev_dt < tmin:
+                continue
+            if tmax and ev_dt >= tmax:
+                continue
+            out.append(dict(ev))
+        return _FakeReq({"items": out})
+
+    def get(self, calendarId, eventId):
+        if eventId not in self.items:
+            raise KeyError(eventId)
+        return _FakeReq(dict(self.items[eventId]))
+
+    def update(self, calendarId, eventId, body):
+        self.items[eventId] = dict(body)
+        self.updated.append((calendarId, eventId, dict(body)))
+        return _FakeReq(dict(body))
+
+    def delete(self, calendarId, eventId):
+        self.items.pop(eventId, None)
+        self.deleted.append((calendarId, eventId))
+        return _FakeReq({})
+
+
+def test_calendar_edit_reschedule_preserves_duration_and_updates_fields(monkeypatch):
+    from jarvis.tools import google_ws
+
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    next_day = (dt.date.today() + dt.timedelta(days=2)).isoformat()
+    start_dt = dt.datetime.fromisoformat(f"{tomorrow}T15:00").astimezone()
+    end_dt = start_dt + dt.timedelta(minutes=90)
+    fake = _FakeCalendarService(
+        [
+            {
+                "id": "ev1",
+                "summary": "Reunión con Juan",
+                "start": {"dateTime": start_dt.isoformat()},
+                "end": {"dateTime": end_dt.isoformat()},
+                "location": "Oficina",
+            }
+        ]
+    )
+    monkeypatch.setattr(google_ws, "_service", lambda name, version: fake)
+
+    res = google_ws.editar_evento(
+        titulo="reunion juan",
+        nuevo_titulo="Reunión de diseño con Juan",
+        nuevo_inicio=f"{next_day}T18:00",
+        lugar="Zoom",
+    )
+    assert res["antes"] == "Reunión con Juan"
+    assert res["titulo"] == "Reunión de diseño con Juan"
+    assert res["fecha"] == next_day
+    assert res["hora"] == "18:00"
+    assert res["lugar"] == "Zoom"
+
+    saved = fake.items["ev1"]
+    new_start = dt.datetime.fromisoformat(saved["start"]["dateTime"])
+    new_end = dt.datetime.fromisoformat(saved["end"]["dateTime"])
+    assert (new_end - new_start) == dt.timedelta(minutes=90)
+
+
+def test_calendar_edit_duration_and_all_day_conversion(monkeypatch):
+    from jarvis.tools import google_ws
+
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    start_dt = dt.datetime.fromisoformat(f"{tomorrow}T10:00").astimezone()
+    fake = _FakeCalendarService(
+        [
+            {
+                "id": "ev2",
+                "summary": "Dentista",
+                "start": {"dateTime": start_dt.isoformat()},
+                "end": {"dateTime": (start_dt + dt.timedelta(minutes=30)).isoformat()},
+            }
+        ]
+    )
+    monkeypatch.setattr(google_ws, "_service", lambda name, version: fake)
+
+    google_ws.editar_evento(evento_id="ev2", duracion_minutos=120)
+    assert (
+        dt.datetime.fromisoformat(fake.items["ev2"]["end"]["dateTime"])
+        - dt.datetime.fromisoformat(fake.items["ev2"]["start"]["dateTime"])
+    ) == dt.timedelta(minutes=120)
+
+    res = google_ws.editar_evento(evento_id="ev2", nuevo_inicio=tomorrow)
+    assert res["hora"] == "todo el dia"
+    assert "date" in fake.items["ev2"]["start"] and "dateTime" not in fake.items["ev2"]["start"]
+
+
+def test_calendar_delete_disambiguates_duplicates_and_deletes_exact_date(monkeypatch):
+    from jarvis.tools import google_ws
+
+    d1 = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    d2 = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    fake = _FakeCalendarService(
+        [
+            {
+                "id": "g1",
+                "summary": "Gimnasio",
+                "start": {"dateTime": dt.datetime.fromisoformat(f"{d1}T09:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat(f"{d1}T10:00").astimezone().isoformat()},
+            },
+            {
+                "id": "g2",
+                "summary": "Gimnasio",
+                "start": {"dateTime": dt.datetime.fromisoformat(f"{d2}T09:00").astimezone().isoformat()},
+                "end": {"dateTime": dt.datetime.fromisoformat(f"{d2}T10:00").astimezone().isoformat()},
+            },
+        ]
+    )
+    monkeypatch.setattr(google_ws, "_service", lambda name, version: fake)
+
+    with pytest.raises(ToolError, match="Hay 2 eventos"):
+        google_ws.eliminar_evento(titulo="gimnasio")
+
+    removed = google_ws.eliminar_evento(titulo="gimnasio", fecha=d2)
+    assert removed["eliminado"] == "Gimnasio"
+    assert removed["fecha"] == d2
+    assert fake.deleted == [("primary", "g2")]
+    assert "g1" in fake.items and "g2" not in fake.items
